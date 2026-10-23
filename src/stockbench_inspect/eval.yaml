@@ -1,0 +1,24 @@
+title: "StockBench: Can LLM Agents Trade Stocks Profitably In Real-world Markets?"
+description: |
+  An LLM agent manages $100,000 across 20 Dow Jones stocks for the 83 trading days from
+  March 3 to June 30, 2025. Each day a filter agent picks the stocks that need
+  fundamentals, then a decision agent sets a target dollar amount for every stock from
+  prices, the last 7 closes, recent news and positions. Orders fill at the open. Scores
+  are cumulative return, maximum drawdown and daily Sortino ratio, alongside an
+  equal-weight buy-and-hold baseline over the same days.
+arxiv: https://arxiv.org/abs/2510.02209
+group: Reasoning
+contributors: ["mahimn01"]
+tasks:
+  - name: stockbench
+    dataset_samples: 1
+tags: ["Agent"]
+metadata:
+  requires:
+    internet: true
+external_assets:
+  - type: direct_url
+    source: "https://codeload.github.com/ChenYXxxx/stockbench/tar.gz/ce8b2b3483590646ad3b650ac8221f43f76fd091"
+    fetch_method: download_and_verify
+    state: pinned
+    comment: "StockBench market data at a pinned commit. Each file used is checked against data/SHA256SUMS."

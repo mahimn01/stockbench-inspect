@@ -1,0 +1,14 @@
+stockbench-inspect
+Copyright 2026 Mahimn Patel
+
+This project ports StockBench to the Inspect evaluation framework.
+
+StockBench: Can LLM Agents Trade Stocks Profitably In Real-world Markets?
+https://github.com/ChenYXxxx/stockbench
+Licensed under the Apache License, Version 2.0.
+
+The files in src/stockbench_inspect/prompts/ are copied unchanged from
+stockbench/agents/prompts/ at commit ce8b2b3483590646ad3b650ac8221f43f76fd091.
+The trading engine, agent loop and metrics are reimplemented from the same commit.
+The market data is downloaded from that commit when the eval first runs and is not
+redistributed by this project.
