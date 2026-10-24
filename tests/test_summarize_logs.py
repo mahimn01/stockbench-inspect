@@ -1,3 +1,4 @@
+import json
 import statistics
 import sys
 from pathlib import Path
@@ -12,7 +13,17 @@ from stockbench_inspect.metrics import sortino
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts" / "parity"))
 from replies import reply
-from summarize_logs import EpochRow, check_against_nav, collect, log_paths, paper_row, paper_sortino, render, spread
+from summarize_logs import (
+    EpochRow,
+    check_against_nav,
+    collect,
+    log_paths,
+    main,
+    paper_row,
+    paper_sortino,
+    render,
+    spread,
+)
 
 
 def test_paper_rows_are_found_for_the_two_local_models() -> None:
@@ -95,6 +106,47 @@ def test_summary_matches_the_mean_inspect_reports(tmp_path, market_data) -> None
         assert statistics.fmean(values) == pytest.approx(reported[name]), name
     table = render(summary, paper_formula=True)
     assert "Mean of 3" in table and "Buy and hold (paper)" in table
+
+
+@pytest.mark.data
+def test_runs_with_different_settings_are_summarized_apart(tmp_path, monkeypatch, capsys) -> None:
+    model = scripted_model("equal")
+    eval(stockbench(days=1), model=model, log_dir=str(tmp_path), display="none")
+    eval(stockbench(days=1, fundamentals=False), model=model, log_dir=str(tmp_path), display="none")
+    eval(stockbench(days=1), model=model, log_dir=str(tmp_path), display="none", temperature=0.2)
+
+    summaries = collect(log_paths([tmp_path]), "mockllm", include_smoke=True)
+    assert [len(s.rows) for s in summaries.values()] == [3, 3, 3]  # not one group of 9
+    assert {s.model for s in summaries.values()} == {"mockllm/model"}
+    assert sorted(s.settings for s in summaries.values()) == [
+        "fundamentals=False, temperature=0.7, max_tokens=16000",
+        "fundamentals=True, temperature=0.2, max_tokens=16000",
+        "fundamentals=True, temperature=0.7, max_tokens=16000",
+    ]
+    for label, summary in summaries.items():
+        table = render(summary, paper_formula=False)
+        assert f"### {label}" in table and summary.settings in label
+        assert "Mean of 3" in table and "Mean of 9" not in table
+        assert "used 3 different settings" in table and "not averaged together" in table
+
+    monkeypatch.setattr(sys, "argv", ["summarize_logs.py", str(tmp_path), "--include-smoke", "--json"])
+    main()
+    printed = json.loads(capsys.readouterr().out)
+    assert {label: len(s["rows"]) for label, s in printed.items()} == {label: 3 for label in summaries}
+
+
+@pytest.mark.data
+def test_runs_with_the_same_settings_are_averaged_together(tmp_path) -> None:
+    model = scripted_model("equal")
+    eval(stockbench(days=1), model=model, log_dir=str(tmp_path), display="none")
+    # Passing the task's own defaults is the same setting as leaving them out.
+    eval(stockbench(days=1, fundamentals=True), model=model, log_dir=str(tmp_path), display="none", temperature=0.7)
+
+    summary = collect(log_paths([tmp_path]), None, include_smoke=True)["mockllm/model"]
+    assert len(summary.rows) == 6 and len(summary.logs) == 2
+    table = render(summary, paper_formula=False)
+    assert table.startswith("### mockllm/model\n") and "Mean of 6" in table
+    assert "different settings" not in table
 
 
 @pytest.mark.data

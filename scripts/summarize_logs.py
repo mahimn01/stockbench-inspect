@@ -66,6 +66,8 @@ class EpochRow:
 @dataclass
 class ModelSummary:
     model: str
+    settings: str
+    label: str  # the model, plus its settings when the model ran with more than one
     rows: list[EpochRow] = field(default_factory=list)
     logs: set[str] = field(default_factory=set)
     commits: set[str] = field(default_factory=set)
@@ -111,8 +113,16 @@ def check_against_nav(row: EpochRow, nav: list[float], raw: dict[str, Any], trad
     return problems
 
 
+def run_settings(log: EvalLog) -> str:
+    """The settings that change results: task arguments other than days, then temperature and max tokens."""
+    generate = log.eval.model_generate_config.merge(log.plan.config)  # the eval's config wins, as in Inspect
+    args = [f"{name}={value}" for name, value in sorted(log.eval.task_args.items()) if name != "days"]
+    return ", ".join([*args, f"temperature={generate.temperature}", f"max_tokens={generate.max_tokens}"])
+
+
 def collect(paths: list[Path], model_filter: str | None, include_smoke: bool) -> dict[str, ModelSummary]:
-    summaries: dict[str, ModelSummary] = {}
+    """One summary per model and settings, keyed by its label. Runs with different settings are never averaged."""
+    groups: dict[tuple[str, str], ModelSummary] = {}
     for path in paths:
         try:
             log: EvalLog = read_eval_log(str(path))
@@ -125,7 +135,10 @@ def collect(paths: list[Path], model_filter: str | None, include_smoke: bool) ->
             continue
         if model_filter and model_filter.lower() not in log.eval.model.lower():
             continue
-        summary = summaries.setdefault(log.eval.model, ModelSummary(model=log.eval.model))
+        settings = run_settings(log)
+        summary = groups.setdefault(
+            (log.eval.model, settings), ModelSummary(model=log.eval.model, settings=settings, label=log.eval.model)
+        )
         summary.logs.add(path.name)
         summary.expected_epochs = max(summary.expected_epochs, log.eval.config.epochs or 1)
         if log.eval.revision:
@@ -156,7 +169,17 @@ def collect(paths: list[Path], model_filter: str | None, include_smoke: bool) ->
             for problem in check_against_nav(row, nav, raw, None if store_trades is None else len(store_trades)):
                 summary.notes.append(f"CHECK FAILED {path.name} epoch {sample.epoch}: {problem}")
             summary.rows.append(row)
-    return {model: summary for model, summary in summaries.items() if summary.rows}
+    finished = [summary for summary in groups.values() if summary.rows]
+    for summary in finished:
+        variants = sum(other.model == summary.model for other in finished)
+        if variants > 1:
+            summary.label = f"{summary.model} ({summary.settings})"
+            summary.notes.insert(
+                0,
+                f"the runs of {summary.model} used {variants} different settings. "
+                "Each is summarized on its own, and they are not averaged together.",
+            )
+    return {summary.label: summary for summary in finished}
 
 
 def mean(values: list[float]) -> float:
@@ -253,7 +276,7 @@ def render(summary: ModelSummary, paper_formula: bool) -> str:
         + ["n/a"] * 4
     )
 
-    lines = [f"### {summary.model}", ""]
+    lines = [f"### {summary.label}", ""]
     lines.append("| " + " | ".join(table[0]) + " |")
     lines.append("|" + "|".join("---" if i == 0 else "---:" for i in range(len(table[0]))) + "|")
     lines += ["| " + " | ".join(row) + " |" for row in table[1:]]
@@ -264,7 +287,8 @@ def render(summary: ModelSummary, paper_formula: bool) -> str:
         else f"{len(rows)} epochs"
     )
     lines.append(
-        f"{status}. Commit: {', '.join(sorted(summary.commits)) or 'unknown'}. Logs: {', '.join(sorted(summary.logs))}."
+        f"{status}. Settings: {summary.settings}. Commit: {', '.join(sorted(summary.commits)) or 'unknown'}. "
+        f"Logs: {', '.join(sorted(summary.logs))}."
     )
     if several_logs:
         lines.append("NOTE: more than one log contributes. Check that they are one run, not a restart.")
@@ -291,7 +315,16 @@ def main() -> None:
     if args.json:
         print(
             json.dumps(
-                {m: {"rows": [asdict(r) for r in s.rows], "notes": s.notes} for m, s in summaries.items()}, indent=2
+                {
+                    label: {
+                        "model": s.model,
+                        "settings": s.settings,
+                        "rows": [asdict(r) for r in s.rows],
+                        "notes": s.notes,
+                    }
+                    for label, s in summaries.items()
+                },
+                indent=2,
             )
         )
         return
