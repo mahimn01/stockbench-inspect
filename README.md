@@ -126,8 +126,10 @@ The code is under the Apache License 2.0, like the original. See `LICENSE` and `
 The prompts in `src/stockbench_inspect/prompts/` are copied unchanged from StockBench.
 
 This repository ships no price, news, fundamentals or dividend files. `src/stockbench_inspect/data/SHA256SUMS` lists the files the eval uses by path and hash only. `tests/golden/upstream_parity.json` holds hashes and daily portfolio values from scripted test runs, and those values are computed from prices.
+
 The eval downloads its market data from the StockBench repository at a pinned commit, as described above. The StockBench README says the data comes from Polygon and Finnhub. This project does not license that data, so use it under the terms of StockBench and of those providers, and check those terms before you redistribute or publish anything built from it.
-Inspect logs of a run contain the full prompts, and the prompts include the news text. Any run logs published for this eval have that text replaced by a placeholder, with scores, portfolio values and decisions unchanged. Logs you produce yourself are not redacted, so check the terms before you share them.
+
+Inspect logs of a run contain the full prompts, and the prompts include the news text. Any run logs published for this eval have that text replaced by a placeholder, with scores, portfolio values and decisions unchanged. Logs you produce yourself are not redacted, so check the terms before you share them. `scripts/scrub_logs.py LOG.eval --out DIR --redact-news` writes a redacted copy of a log. It replaces the news text, including partial quotes of it in model replies, and also local paths and user names. Paraphrases by a model are not caught, so read a copy before you share it.
 
 ## Development
 
