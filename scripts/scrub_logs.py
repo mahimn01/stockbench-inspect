@@ -12,8 +12,8 @@ The prompts of a run hold them in the "top_k_events" lists, and a model can quot
 replies and reasoning. The script replaces every item of every list, then replaces any other
 exact occurrence of those items, and of the title and description of every news item in the
 pinned StockBench data, anywhere in the log. Finally it replaces any run of --min-words (default 6)
-words in a row that is found in a news item, which catches a model quoting part of a headline.
-A model that paraphrases a headline is not caught.
+words in a row that is found in a news item, which catches a model quoting a long part of a headline.
+A model that paraphrases a headline, or quotes fewer words of it, is not caught.
 Scores, portfolio values, decisions and the rest of each prompt are not changed. The script
 prints how many known news strings are left in each copy, which should be 0. Pass
 --no-dataset to skip the pinned data (no download) and use only the items found in the prompts.
@@ -43,6 +43,8 @@ MIN_NEWS_CHARS = 12
 # A model often quotes only part of a headline, so a run of this many words in a row that appears in a
 # news item is redacted too. Shorter runs are too likely to be ordinary text.
 MIN_NEWS_WORDS = 6
+# Runs shorter than this would rewrite ordinary values such as "stop" or "user", so --min-words must be 0 or at least this.
+LOWEST_MIN_WORDS = 4
 WORD = re.compile(r"\S+")
 WORD_EDGES = " \t\r\n\\\"'.,;:!?()[]{}<>*_`\u2018\u2019\u201c\u201d"
 
@@ -52,7 +54,8 @@ def scrub(log: EvalLog) -> EvalLog:
     home = str(Path.home())
     user = getpass.getuser()
     text = text.replace(home, "~").replace(f"/{user}/", "/user/")
-    text = re.sub(r"/Volumes/[^/\\\s\"]+", "/Volumes/volume", text)
+    # A volume name may hold spaces, so it runs to the next "/" or the end of the JSON string.
+    text = re.sub(r'/Volumes/[^/\\"]+', "/Volumes/volume", text)
     return EvalLog.model_validate_json(text)
 
 
@@ -243,6 +246,13 @@ def leftovers(log: EvalLog) -> int:
     return text.count(getpass.getuser()) + len(re.findall(r"/Users/|/Volumes/(?!volume\b)", text))
 
 
+def min_words_arg(value: str) -> int:
+    number = int(value)
+    if number != 0 and number < LOWEST_MIN_WORDS:
+        raise argparse.ArgumentTypeError(f"must be 0 (off) or at least {LOWEST_MIN_WORDS}")
+    return number
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("logs", nargs="+", type=Path)
@@ -251,11 +261,17 @@ def main() -> None:
     parser.add_argument("--no-dataset", action="store_true", help="with --redact-news, do not load the pinned data")
     parser.add_argument(
         "--min-words",
-        type=int,
+        type=min_words_arg,
         default=MIN_NEWS_WORDS,
         help="with --redact-news, also replace any run of this many words in a row found in a news item, 0 to skip",
     )
     args = parser.parse_args()
+    # Refuse to overwrite an original log, or one input with another of the same name.
+    names = [path.name for path in args.logs]
+    if len(set(names)) != len(names):
+        parser.error("two input logs have the same file name, so one copy would overwrite the other")
+    if any((args.out / path.name).resolve() == path.resolve() for path in args.logs):
+        parser.error("--out would overwrite an original log, choose another directory")
     args.out.mkdir(parents=True, exist_ok=True)
     dataset: set[str] = set()
     if args.redact_news and not args.no_dataset:

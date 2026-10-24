@@ -33,7 +33,7 @@ def test_scrub_removes_local_paths_and_keeps_the_scores(tmp_path, market_data) -
     assert leftovers(scrubbed) == 0
     assert scrubbed.eval.metadata["home"] == "~/work/logs"
     assert scrubbed.eval.metadata["disk"] == "/Volumes/volume/stockbench-work/logs"
-    assert scrubbed.eval.metadata["disk_in_text"].startswith('see "/Volumes/volume')
+    assert scrubbed.eval.metadata["disk_in_text"] == 'see "/Volumes/volume/a" or /Volumes/volume/b'
 
     target = tmp_path / "out" / "log.eval"
     target.parent.mkdir()
@@ -178,3 +178,51 @@ def test_redact_news_on_a_real_run_keeps_the_scores(tmp_path, market_data) -> No
         s.scores[score].metadata["nav"] for s in log.samples
     ]
     assert [e.event for e in reread.samples[0].events] == [e.event for e in log.samples[0].events]
+
+
+def test_redact_news_replaces_a_short_known_string_by_exact_match(tmp_path) -> None:
+    # Four words are below the six-word run rule, so only the exact-match pass can catch this one.
+    log = _mock_log(tmp_path, "I read Acme beats third quarter today.")
+
+    redacted, stats = redact_news(log, {"Acme beats third quarter"})
+
+    assert redacted.samples[0].output.completion == f"I read {NEWS_PLACEHOLDER} today."
+    assert stats.elsewhere >= 1
+
+
+@pytest.mark.parametrize("out_name", ["in", "other"])
+def test_cli_never_overwrites_an_original_log(tmp_path, monkeypatch, out_name) -> None:
+    log = _mock_log(tmp_path)
+    source = Path(log.location)
+    before = source.read_bytes()
+    out = source.parent if out_name == "in" else tmp_path / out_name
+    monkeypatch.setattr(sys, "argv", ["scrub_logs.py", str(source), "--out", str(out), "--no-dataset"])
+    if out_name == "in":
+        with pytest.raises(SystemExit) as raised:
+            main()
+        assert raised.value.code == 2
+        assert source.read_bytes() == before
+    else:
+        main()
+        assert (out / source.name).exists()
+        assert source.read_bytes() == before
+
+
+def test_cli_rejects_two_inputs_with_the_same_name(tmp_path, monkeypatch) -> None:
+    log = _mock_log(tmp_path)
+    source = Path(log.location)
+    copy = tmp_path / "copy" / source.name
+    copy.parent.mkdir()
+    copy.write_bytes(source.read_bytes())
+    monkeypatch.setattr(sys, "argv", ["scrub_logs.py", str(source), str(copy), "--out", str(tmp_path / "out")])
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["1", "2", "3", "-1"])
+def test_cli_rejects_a_min_words_that_would_rewrite_ordinary_values(tmp_path, monkeypatch, value) -> None:
+    monkeypatch.setattr(sys, "argv", ["scrub_logs.py", "x.eval", "--out", str(tmp_path), "--min-words", value])
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 2
