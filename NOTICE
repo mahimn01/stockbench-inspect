@@ -10,5 +10,8 @@ Licensed under the Apache License, Version 2.0.
 The files in src/stockbench_inspect/prompts/ are copied unchanged from
 stockbench/agents/prompts/ at commit ce8b2b3483590646ad3b650ac8221f43f76fd091.
 The trading engine, agent loop and metrics are reimplemented from the same commit.
-The market data is downloaded from that commit when the eval first runs and is not
-redistributed by this project.
+This repository contains no price, news, fundamentals or dividend files. When the eval
+first runs, it downloads the StockBench repository archive at the same commit from GitHub,
+keeps the files listed in src/stockbench_inspect/data/SHA256SUMS and checks each file's hash.
+The StockBench README says its data comes from Polygon and Finnhub. That data stays under the
+terms that apply to it upstream, and this project grants no rights to it.

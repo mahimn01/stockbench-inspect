@@ -26,8 +26,8 @@ OLLAMA_CONTEXT_LENGTH=40960 ollama serve
 uv run inspect eval src/stockbench_inspect/tasks.py@stockbench --model ollama/gpt-oss:20b --max-connections 1
 ```
 
-The first run downloads the market data (about 6 MB) from the StockBench repository at a pinned commit.
-Every file is checked against `src/stockbench_inspect/data/SHA256SUMS`.
+The first run downloads the archive of the StockBench repository at a pinned commit (about 6 MB) and keeps the market data files listed in `src/stockbench_inspect/data/SHA256SUMS` in your user cache directory.
+Every kept file is checked against that list.
 
 ### Options
 
@@ -124,7 +124,10 @@ These are part of the published setup, so the port keeps them:
 
 The code is under the Apache License 2.0, like the original. See `LICENSE` and `NOTICE`.
 The prompts in `src/stockbench_inspect/prompts/` are copied unchanged from StockBench.
-The market data comes from Polygon and Finnhub through the StockBench repository. It is downloaded from there and not included here.
+
+This repository ships no price, news, fundamentals or dividend files. `src/stockbench_inspect/data/SHA256SUMS` lists the files the eval uses by path and hash only. `tests/golden/upstream_parity.json` holds hashes and daily portfolio values from scripted test runs, and those values are computed from prices.
+The eval downloads its market data from the StockBench repository at a pinned commit, as described above. The StockBench README says the data comes from Polygon and Finnhub. This project does not license that data, so use it under the terms of StockBench and of those providers, and check those terms before you redistribute or publish anything built from it.
+Inspect logs of a run contain the full prompts, and the prompts include the news text. Any run logs published for this eval have that text replaced by a placeholder, with scores, portfolio values and decisions unchanged. Logs you produce yourself are not redacted, so check the terms before you share them.
 
 ## Development
 
