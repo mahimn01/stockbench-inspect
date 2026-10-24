@@ -11,12 +11,19 @@ With --redact-news, the news headlines and summaries are also replaced by a plac
 The prompts of a run hold them in the "top_k_events" lists, and a model can quote them in its
 replies and reasoning. The script replaces every item of every list, then replaces any other
 exact occurrence of those items, and of the title and description of every news item in the
-pinned StockBench data, anywhere in the log. Finally it replaces any run of --min-words (default 6)
-words in a row that is found in a news item, which catches a model quoting a long part of a headline.
-A model that paraphrases a headline, or quotes fewer words of it, is not caught.
-Scores, portfolio values, decisions and the rest of each prompt are not changed. The script
-prints how many known news strings are left in each copy, which should be 0. Pass
---no-dataset to skip the pinned data (no download) and use only the items found in the prompts.
+pinned StockBench data, anywhere in the log. Finally it replaces the text inside any pair of quote
+marks ("...", '...' or curly quotes) that holds --min-words (default 3) or more words and appears
+word for word in a news item, and any run of 6 or more words in a row found in a news item, quoted
+or not. Words are compared without case and without the punctuation at their edges, and an
+apostrophe inside a word (BRK.B's, don't) is not taken for a quote mark. No match crosses a line
+break, and the quote marks stay. Unquoted runs of fewer than 6 words are left alone, since they
+match ordinary prose too often. A --min-words above 6 raises the run length to the same number, and
+--min-words 0 turns off both rules. A model that paraphrases a headline, or quotes fewer than 6 of
+its words without quote marks, is not caught. A short quoted phrase that is common in the news, such
+as "strong balance sheet", is replaced too. Scores, portfolio values, decisions and the rest of each
+prompt are not changed, except for text that matches these rules. The script then counts the news
+left in each copy by the same rules, which should be 0. Pass --no-dataset to skip the pinned data
+(no download) and use only the items found in the prompts.
 
 The original logs are not changed.
 """
@@ -41,12 +48,16 @@ EVENTS_KEY = '"top_k_events": '
 # Shorter strings are too likely to match ordinary text, so they are only redacted inside the lists.
 MIN_NEWS_CHARS = 12
 # A model often quotes only part of a headline, so a run of this many words in a row that appears in a
-# news item is redacted too. Shorter runs are too likely to be ordinary text.
-MIN_NEWS_WORDS = 6
-# Runs shorter than this would rewrite ordinary values such as "stop" or "user", so --min-words must be 0 or at least this.
-LOWEST_MIN_WORDS = 4
+# news item is redacted too, quoted or not. Shorter unquoted runs are too likely to be ordinary text.
+MIN_RUN_WORDS = 6
+# A quoted span of this many words or more (the default of --min-words) that appears in a news item is redacted.
+MIN_QUOTE_WORDS = 3
+# Quotes shorter than this would rewrite ordinary values such as "hold" or "Apple Inc", so --min-words must be
+# 0 or at least this.
+LOWEST_MIN_WORDS = 3
 WORD = re.compile(r"\S+")
 WORD_EDGES = " \t\r\n\\\"'.,;:!?()[]{}<>*_`\u2018\u2019\u201c\u201d"
+QUOTE_MARKS = {'"': '"', "'": "'", "\u201c": "\u201d", "\u2018": "\u2019"}  # opening mark: closing mark
 
 
 def scrub(log: EvalLog) -> EvalLog:
@@ -101,48 +112,101 @@ def _map_strings(node: Any, fn: Any) -> Any:
     return node
 
 
-def _words(text: str) -> list[tuple[str, int, int]]:
-    """Each whitespace-separated word as (lowercase word without edge punctuation, start, end) in `text`."""
+def _words(text: str) -> list[tuple[str, int, int, str, str]]:
+    """Each whitespace-separated word as (lowercase word without edge punctuation, start, end, punctuation
+    before it, punctuation after it) in `text`."""
     words = []
     for match in WORD.finditer(text):
         raw = match.group()
         core = raw.strip(WORD_EDGES)
         if core:
-            start = match.start() + raw.index(core[0])
-            words.append((core.casefold(), start, start + len(core)))
+            offset = raw.index(core[0])
+            start = match.start() + offset
+            words.append((core.casefold(), start, start + len(core), raw[:offset], raw[offset + len(core) :]))
         else:
-            words.append((raw, match.start(), match.end()))
+            words.append((raw, match.start(), match.end(), "", ""))
     return words
 
 
-def _word_runs(known: Iterable[str], size: int) -> set[tuple[str, ...]]:
-    """Every run of `size` words in a row found in any of the `known` news strings."""
+def _run_length(min_words: int) -> int:
+    """Fewest words in a row that are redacted without quote marks."""
+    return max(min_words, MIN_RUN_WORDS)
+
+
+def _word_runs(known: Iterable[str], min_words: int) -> set[tuple[str, ...]]:
+    """Every run of `min_words` up to _run_length(min_words) words in a row found in a `known` news string
+    (none when `min_words` is 0). Strings shorter than MIN_NEWS_CHARS are skipped, as in the exact match."""
+    if min_words == 0:
+        return set()
     runs: set[tuple[str, ...]] = set()
     for news in known:
-        words = [word for word, _, _ in _words(news)]
-        runs.update(tuple(words[i : i + size]) for i in range(len(words) - size + 1))
+        if len(news) < MIN_NEWS_CHARS or news == NEWS_PLACEHOLDER:
+            continue
+        words = [word for word, *_ in _words(news)]
+        for size in range(min_words, _run_length(min_words) + 1):
+            runs.update(tuple(words[i : i + size]) for i in range(len(words) - size + 1))
     return runs
 
 
-def _quoted_spans(text: str, runs: set[tuple[str, ...]], size: int) -> list[tuple[int, int]]:
-    """Character spans of `text` made of words that sit in a run of `size` words from the news.
+def _quotes(text: str, words: list[tuple[str, int, int, str, str]]) -> list[tuple[int, int]]:
+    """First and last word of each quoted span in `text`, found by the quote marks at the edges of the words.
 
-    A span never crosses a line break, so the quote marks and line breaks around a quote stay.
+    An apostrophe inside a word is not at an edge, so it is not taken for a quote mark. A quote never crosses a
+    line break. A second opening mark before the closing one starts the quote again, so a quote escaped inside a
+    JSON string (\\"...\\") is found inside the string around it.
     """
+    quotes: list[tuple[int, int]] = []
+    opened: dict[str, int] = {}  # closing mark: word that opened it
+    for i, (_, start, _, before, after) in enumerate(words):
+        if i > 0 and "\n" in text[words[i - 1][2] : start]:
+            opened.clear()
+        for mark in before:
+            if mark in QUOTE_MARKS:
+                opened[QUOTE_MARKS[mark]] = i
+        for mark in after:
+            if mark in opened:
+                quotes.append((opened.pop(mark), i))
+    return quotes
+
+
+def _news_spans(text: str, runs: set[tuple[str, ...]], min_words: int) -> list[tuple[int, int]]:
+    """Character spans of `text` that hold news: words that sit in a run of _run_length(min_words) words from
+    the news, and the words of a quoted span of `min_words` or more words found as it is in a news item.
+
+    `runs` comes from _word_runs with the same `min_words`. A span never crosses a line break, and only the
+    words are replaced, so the quote marks and line breaks around a quote stay.
+    """
+    if not runs:
+        return []
     words = _words(text)
+    keys = [word for word, *_ in words]
+    size = _run_length(min_words)
     covered = [False] * len(words)
     for i in range(len(words) - size + 1):
-        if tuple(word for word, _, _ in words[i : i + size]) in runs:
+        if tuple(keys[i : i + size]) in runs:
             covered[i : i + size] = [True] * size
-    spans: list[tuple[int, int]] = []
-    for i, (_, start, end) in enumerate(words):
+    groups: list[list[int]] = []  # first and last word of each span
+    for i, (_, start, *_) in enumerate(words):
         if not covered[i]:
             continue
-        if i > 0 and covered[i - 1] and "\n" not in text[words[i - 1][2] : start]:
-            spans[-1] = (spans[-1][0], end)
+        if groups and groups[-1][1] == i - 1 and "\n" not in text[words[i - 1][2] : start]:
+            groups[-1][1] = i
         else:
-            spans.append((start, end))
-    return spans
+            groups.append([i, i])
+    # Longer quotes are left to the runs above. A quote is added on its own, so two quotes side by side
+    # keep the marks between them.
+    groups += [
+        [first, last]
+        for first, last in _quotes(text, words)
+        if min_words <= last + 1 - first < size and tuple(keys[first : last + 1]) in runs
+    ]
+    spans: list[list[int]] = []
+    for first, last in sorted(groups):
+        if spans and first <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], last)
+        else:
+            spans.append([first, last])
+    return [(words[first][1], words[last][2]) for first, last in spans]
 
 
 def _event_lists(text: str) -> Iterable[tuple[int, int, list[Any] | None]]:
@@ -162,7 +226,7 @@ def _event_lists(text: str) -> Iterable[tuple[int, int, list[Any] | None]]:
 
 
 def redact_news(
-    log: EvalLog, known: Iterable[str] = (), min_words: int = MIN_NEWS_WORDS
+    log: EvalLog, known: Iterable[str] = (), min_words: int = MIN_QUOTE_WORDS
 ) -> tuple[EvalLog, NewsRedaction]:
     """Copy of `log` with news text replaced by a placeholder, see the module docstring."""
     tree = json.loads(log.model_dump_json())
@@ -175,7 +239,7 @@ def redact_news(
         key=len,
         reverse=True,
     )
-    runs = _word_runs(needles, min_words) if min_words > 0 else set()
+    runs = _word_runs(needles, min_words)
 
     memo: dict[str, tuple[str, NewsRedaction]] = {}
 
@@ -210,29 +274,29 @@ def redact_news(
             if needle in text:
                 stats.elsewhere += text.count(needle)
                 text = text.replace(needle, NEWS_PLACEHOLDER)
-        if runs:
-            spans = _quoted_spans(text, runs, min_words)
-            stats.partial += len(spans)
-            for start, end in reversed(spans):
-                text = text[:start] + NEWS_PLACEHOLDER + text[end:]
+        spans = _news_spans(text, runs, min_words)
+        stats.partial += len(spans)
+        for start, end in reversed(spans):
+            text = text[:start] + NEWS_PLACEHOLDER + text[end:]
         return text
 
     return EvalLog.model_validate(_map_strings(tree, redact)), stats
 
 
-def news_leftovers(log: EvalLog, known: Iterable[str], min_words: int = MIN_NEWS_WORDS) -> int:
+def news_leftovers(log: EvalLog, known: Iterable[str], min_words: int = MIN_QUOTE_WORDS) -> int:
     """Occurrences of the `known` news strings in the log, plus news-list items that are not placeholders,
-    plus lists that cannot be parsed, plus runs of `min_words` words from the news (0 turns this off).
+    plus lists that cannot be parsed, plus the quoted spans and runs of words from the news that redact_news
+    would replace with the same `min_words` (0 turns these off).
 
     A string counts when it appears as it is or JSON-escaped (for example inside a JSON string).
     """
     needles = {n for n in known if len(n) >= MIN_NEWS_CHARS}
     needles |= {json.dumps(n, ensure_ascii=ensure)[1:-1] for n in needles for ensure in (False, True)}
-    runs = _word_runs(known, min_words) if min_words > 0 else set()
+    runs = _word_runs(known, min_words)
     count = 0
     for text, times in Counter(_strings(json.loads(log.model_dump_json()))).items():
         found = sum(text.count(n) for n in needles)
-        found += len(_quoted_spans(text, runs, min_words)) if runs else 0
+        found += len(_news_spans(text, runs, min_words))
         for _, _, value in _event_lists(text):
             # A list that does not parse counts as one leftover, since its items cannot be checked.
             found += 1 if value is None else sum(item not in (NEWS_PLACEHOLDER, NO_NEWS) for item in value)
@@ -262,8 +326,12 @@ def main() -> None:
     parser.add_argument(
         "--min-words",
         type=min_words_arg,
-        default=MIN_NEWS_WORDS,
-        help="with --redact-news, also replace any run of this many words in a row found in a news item, 0 to skip",
+        default=MIN_QUOTE_WORDS,
+        help=(
+            "with --redact-news, also replace any quoted span of this many words or more found in a news item "
+            f"(default {MIN_QUOTE_WORDS}, at least {LOWEST_MIN_WORDS}), and any run of {MIN_RUN_WORDS} words in a "
+            "row (or this many if more) found in one, quoted or not. 0 turns both off"
+        ),
     )
     args = parser.parse_args()
     # Refuse to overwrite an original log, or one input with another of the same name.

@@ -1,5 +1,6 @@
 import getpass
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from inspect_ai.solver import generate
 from stockbench_inspect import stockbench
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import scrub_logs
 from scrub_logs import NEWS_PLACEHOLDER, leftovers, main, news_from_data, news_leftovers, redact_news, scrub
 
 
@@ -120,6 +122,78 @@ def test_redact_news_replaces_a_partial_quote_but_not_short_or_unrelated_text(tm
     assert news_leftovers(kept, set(HEADLINES)) > 0
 
 
+SHORT_NEWS = {
+    "Caterpillar Volumes Keep Sliding as dealers cut their stock",
+    "Salesforce buys Moonhub to build AI hiring tools",
+    "Citi downgrades Sherwin-Williams on weak housing demand",
+    "BRK.B's Insurance Business Grows Steadily this year",
+}
+# Five quotes of 3 to 5 words from SHORT_NEWS, then the same words without quote marks, in a quote of two words
+# and in a quote cut by a line break, none of which is news to redact.
+SHORT_QUOTES = (
+    "Caterpillar: \"Caterpillar Volumes Keep Sliding\", and 'Salesforce buys Moonhub' is small.\n"
+    "Then “Citi downgrades Sherwin-Williams” and 'BRK.B's Insurance Business Grows Steadily'. I don't mind.\n"
+    '{"reasons": ["The \\"Salesforce buys Moonhub\\" deal is small"]}\n'
+    'Salesforce buys Moonhub, unquoted, stays, and so do "Citi downgrades" and "Salesforce buys\nMoonhub" here.'
+)
+
+
+def test_redact_news_replaces_a_short_quote_but_not_the_same_words_unquoted(tmp_path) -> None:
+    log = _mock_log(tmp_path, SHORT_QUOTES)
+
+    redacted, stats = redact_news(log, SHORT_NEWS)
+
+    news = NEWS_PLACEHOLDER
+    assert redacted.samples[0].output.completion == (
+        f"Caterpillar: \"{news}\", and '{news}' is small.\n"
+        f"Then “{news}” and '{news}'. I don't mind.\n"
+        f'{{"reasons": ["The \\"{news}\\" deal is small"]}}\n'
+        'Salesforce buys Moonhub, unquoted, stays, and so do "Citi downgrades" and "Salesforce buys\nMoonhub" here.'
+    )
+    assert stats.partial >= 5
+
+
+def test_news_leftovers_counts_the_short_quotes_that_redact_news_replaces() -> None:
+    log = EvalLog(
+        status="success",
+        eval=EvalSpec(created="2026-01-01", task="t", dataset=EvalDataset(), model="m", config=EvalConfig()),
+    )
+    log.eval.metadata = {"reply": SHORT_QUOTES}
+    assert news_leftovers(log, SHORT_NEWS) == 5
+    # Only the 4- and 5-word quotes reach 4 words, and 6 or 0 leave no short quote to count.
+    assert news_leftovers(log, SHORT_NEWS, min_words=4) == 2
+    assert news_leftovers(log, SHORT_NEWS, min_words=6) == 0
+    assert news_leftovers(log, SHORT_NEWS, min_words=0) == 0
+
+    # A copy holds the reply more than once, since Inspect also copies eval.metadata to the top of the log.
+    kept, _ = redact_news(log, SHORT_NEWS, min_words=0)
+    assert news_leftovers(kept, SHORT_NEWS) >= 5
+    redacted, stats = redact_news(log, SHORT_NEWS)
+    assert stats.partial == 5
+    assert news_leftovers(redacted, SHORT_NEWS) == 0
+
+
+def test_cli_redacts_a_short_quote_and_reports_one_that_is_left(tmp_path, monkeypatch, capsys) -> None:
+    log = _mock_log(tmp_path, 'I will hold ACME after "Acme Corp beats estimates" today.')
+    source = Path(log.location)
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        sys, "argv", ["scrub_logs.py", str(source), "--out", str(out_dir), "--redact-news", "--no-dataset"]
+    )
+    main()
+    assert capsys.readouterr().out.rstrip().endswith(", clean)")
+    completion = read_eval_log(str(out_dir / source.name)).samples[0].output.completion
+    assert completion == f'I will hold ACME after "{NEWS_PLACEHOLDER}" today.'
+
+    # A copy that still holds the short quote must not be reported as clean.
+    real = scrub_logs.redact_news
+    monkeypatch.setattr(scrub_logs, "redact_news", lambda log, known, min_words: real(log, known, 0))
+    main()
+    left = re.search(r", (\d+) left\)$", capsys.readouterr().out.rstrip())
+    assert left and int(left.group(1)) > 0
+    assert "Acme Corp beats estimates" in read_eval_log(str(out_dir / source.name)).samples[0].output.completion
+
+
 def test_redact_news_does_not_change_the_original_or_touch_short_strings(tmp_path) -> None:
     log = _mock_log(tmp_path)
     before = log.model_dump_json()
@@ -181,7 +255,7 @@ def test_redact_news_on_a_real_run_keeps_the_scores(tmp_path, market_data) -> No
 
 
 def test_redact_news_replaces_a_short_known_string_by_exact_match(tmp_path) -> None:
-    # Four words are below the six-word run rule, so only the exact-match pass can catch this one.
+    # Four unquoted words are below the six-word run rule, so only the exact-match pass can catch this one.
     log = _mock_log(tmp_path, "I read Acme beats third quarter today.")
 
     redacted, stats = redact_news(log, {"Acme beats third quarter"})
@@ -220,9 +294,22 @@ def test_cli_rejects_two_inputs_with_the_same_name(tmp_path, monkeypatch) -> Non
     assert raised.value.code == 2
 
 
-@pytest.mark.parametrize("value", ["1", "2", "3", "-1"])
+@pytest.mark.parametrize("value", ["1", "2", "-1"])
 def test_cli_rejects_a_min_words_that_would_rewrite_ordinary_values(tmp_path, monkeypatch, value) -> None:
     monkeypatch.setattr(sys, "argv", ["scrub_logs.py", "x.eval", "--out", str(tmp_path), "--min-words", value])
     with pytest.raises(SystemExit) as raised:
         main()
     assert raised.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "3"])
+def test_cli_accepts_a_min_words_of_0_or_3(tmp_path, monkeypatch, capsys, value) -> None:
+    log = _mock_log(tmp_path, 'I will hold ACME after "Acme Corp beats estimates" today.')
+    source = Path(log.location)
+    argv = ["scrub_logs.py", str(source), "--out", str(tmp_path / "out"), "--redact-news", "--no-dataset"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--min-words", value])
+    main()
+    assert capsys.readouterr().out.rstrip().endswith(", clean)")
+    completion = read_eval_log(str(tmp_path / "out" / source.name)).samples[0].output.completion
+    # 0 turns the quote rule off, so the 4-word quote stays.
+    assert ("Acme Corp beats estimates" in completion) == (value == "0")
