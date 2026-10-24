@@ -73,6 +73,33 @@ Across all three, every prompt is identical byte for byte, and the trades and da
 
 **The paper's baseline.** The buy-and-hold baseline comes out at 0.4% return, -15.2% max drawdown and Sortino 0.0155. That matches Table 2 of the paper.
 
+## Results versus the paper
+
+Results from this port are in the first table. The paper's numbers are in the second. Each model ran 3 epochs on the full window, 2025-03-03 to 2025-06-30, and the numbers are the mean of the 3 epochs, as the paper averages 3 runs. Every number in this section was produced by `scripts/summarize_logs.py` from the logs at commit `TBD`.
+
+| Model | Return | Max drawdown | Sortino | Trades | Unusable decisions | Fallback days |
+|---|---:|---:|---:|---:|---:|---:|
+| `gpt-oss:20b` | TBD | TBD | TBD | TBD | TBD | TBD |
+| `qwen3:30b-a3b-thinking-2507` | TBD | TBD | TBD | TBD | TBD | TBD |
+| Buy and hold | TBD | TBD | TBD | n/a | n/a | n/a |
+
+| Paper, Table 2 | Return | Max drawdown | Sortino |
+|---|---:|---:|---:|
+| GPT-OSS-20B | -2.8% | -14.4% | -0.0069 |
+| Qwen3-30B-Think | 2.1% | -13.5% | 0.0255 |
+| Passive baseline | 0.4% | -15.2% | 0.0155 |
+
+Per-epoch numbers are in `TBD`.
+
+How to read the comparison:
+
+- **Three epochs is a small sample.** Each epoch is one 83-day backtest of one model. Epochs of the same model can land several points apart, so a gap to the paper smaller than that spread is not evidence of a difference. The per-epoch table shows the spread.
+- **The setup is not identical to the paper's.** The models here ran locally in Ollama with 4-bit quantized weights (`TBD`), a context of `TBD` tokens, temperature 0.7 and a maximum of 16000 output tokens. The paper does not say which quantization or serving stack it used, and it reports a 32,768 token context. A different quantization, context size or serving stack can change the replies and so the trades.
+- **Costs.** This port charges a 1 basis point commission on every order, as the released code does. The limitations section of the paper's second version says trading costs are not modeled.
+- **The window length differs by one day.** The paper's text says 82 trading days. This port uses the 83 days that have price data, which is the length that reproduces the paper's baseline Sortino.
+- **Compare against buy and hold first.** In this window the equal-weight baseline returned about 0.4% with a drawdown of about -15.2%. A model that ends near zero but trades very little or falls back to holding on most days is behaving like the baseline, so check the fallback and unusable-reply columns before reading a return as skill.
+- **The Sortino formula in the paper's text differs from the released code.** The text describes a root mean square of the negative returns. The released code, and this port, divide the mean daily return by the sample standard deviation of the negative daily returns. The baseline Sortino of 0.0155 in Table 2 reproduces only with the code's version. The text's version gives 0.0124 for the same baseline.
+
 ## Differences from the original code
 
 Each one fixes a bug or a look-ahead in the released code.
