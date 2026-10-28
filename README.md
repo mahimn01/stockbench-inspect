@@ -75,13 +75,13 @@ Across all three, every prompt is identical byte for byte, and the trades and da
 
 ## Results versus the paper
 
-Results from this port are in the first table. The paper's numbers are in the second. Each model ran 3 epochs on the full window, 2025-03-03 to 2025-06-30, and the numbers are the mean of the 3 epochs, as the paper averages 3 runs. Every number in the first table was produced by `scripts/summarize_logs.py` from the logs at commit `TBD`. The second table is copied from the paper.
+Results from this port are in the first two tables. The paper's numbers are in the third. Each model ran 3 epochs on the full window, 2025-03-03 to 2025-06-30, and the first table is the mean of the 3 epochs, as the paper averages 3 runs. Every number in the first two tables was produced by `scripts/summarize_logs.py` from the logs of runs made at commit `e855d7e`. The paper table is copied from the paper.
 
 | Model | Return | Max drawdown | Sortino | Trades | Unusable decisions | Fallback days |
 |---|---:|---:|---:|---:|---:|---:|
-| `gpt-oss:20b` | TBD | TBD | TBD | TBD | TBD | TBD |
-| `qwen3:30b-a3b-thinking-2507` | TBD | TBD | TBD | TBD | TBD | TBD |
-| Buy and hold | TBD | TBD | TBD | n/a | n/a | n/a |
+| `gpt-oss:20b` | -1.02% | -13.6% | -0.0006 | 155 | 1.4% | 1.3 |
+| `qwen3:30b-a3b-thinking-2507-q4_K_M` | 0.99% | -12.5% | 0.0204 | 141 | 21.4% | 20.3 |
+| Buy and hold | 0.41% | -15.2% | 0.0155 | n/a | n/a | n/a |
 
 | Paper, Table 2 | Return | Max drawdown | Sortino |
 |---|---:|---:|---:|
@@ -89,12 +89,22 @@ Results from this port are in the first table. The paper's numbers are in the se
 | Qwen3-30B-Think | 2.1% | -13.5% | 0.0255 |
 | Passive baseline | 0.4% | -15.2% | 0.0155 |
 
-Per-epoch numbers are in `TBD`.
+Per-epoch numbers, from the same logs:
+
+| Model | Epoch | Return | Max drawdown | Sortino | Trades | Unusable decisions | Fallback days |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `gpt-oss:20b` | 1 | -1.36% | -12.0% | -0.0052 | 145 | 1.1% | 1 |
+| `gpt-oss:20b` | 2 | -0.20% | -15.8% | 0.0102 | 184 | 1.0% | 1 |
+| `gpt-oss:20b` | 3 | -1.50% | -13.0% | -0.0068 | 136 | 2.1% | 2 |
+| `qwen3:30b-a3b-thinking-2507-q4_K_M` | 1 | 4.73% | -11.4% | 0.0604 | 171 | 23.2% | 23 |
+| `qwen3:30b-a3b-thinking-2507-q4_K_M` | 2 | -3.46% | -11.6% | -0.0266 | 48 | 10.6% | 10 |
+| `qwen3:30b-a3b-thinking-2507-q4_K_M` | 3 | 1.69% | -14.6% | 0.0273 | 204 | 30.4% | 28 |
 
 How to read the comparison:
 
-- **Three epochs is a small sample.** Each epoch is one 83-day backtest of one model. Epochs of the same model can land several points apart, so a gap to the paper smaller than that spread is not evidence of a difference. The per-epoch table shows the spread.
-- **The setup is not identical to the paper's.** The models here ran locally in Ollama with 4-bit quantized weights (`TBD`), a context of `TBD` tokens, temperature 0.7 and a maximum of 16000 output tokens. The paper does not say which quantization or serving stack it used, and it reports a 32,768 token context. It says its models were decoded with each model's recommended settings, while this port uses temperature 0.7 for both models. A different quantization, context size or serving stack can change the replies and so the trades.
+- **Three epochs is a small sample.** Each epoch is one 83-day backtest of one model, and all runs use the same single window, so the results say nothing about other periods. Epochs of the same model land several points apart: the Qwen3 epochs range from -3.46% to +4.73%, and the gpt-oss epochs from -1.50% to -0.20%. The Qwen3 mean of +0.99% is smaller than the spread between its own epochs, and its gap to the paper's 2.1% is within that spread, so it is not evidence of a difference. The gpt-oss mean of -1.02% is higher than the paper's -2.8% in all 3 epochs, but 3 epochs is too few to say the port or the setup causes that.
+- **A large share of the Qwen3 replies could not be used.** On average 21.4% of its decision replies (10.6% to 30.4% by epoch) gave no usable decision for any stock, and 28.0% of its filter replies had no usable JSON. It fell back to holding every stock on 23, 10 and 28 of the 83 days. A day without a usable decision leaves the portfolio unchanged, so a Qwen3 return mixes the model's choices with how often it produced a reply the scorer could read. The gpt-oss runs had 1.4% unusable decisions and 1 to 2 fallback days. Epoch 2 of Qwen3 had the fewest fallback days (10) and also the fewest trades (48), so fallback days alone do not explain the differences between its epochs.
+- **The setup is not identical to the paper's.** The models here ran locally in Ollama with 4-bit quantized weights (`gpt-oss:20b` is MXFP4, the Qwen3 tag is Q4_K_M), a context of 40960 tokens with an 8-bit KV cache, temperature 0.7 and a maximum of 16000 output tokens. The Qwen3 run went through Inspect's `openai-api` provider against Ollama's OpenAI-compatible endpoint, with a 1800 second client timeout. A first attempt with the default 600 second timeout was stopped after many calls timed out and was restarted from scratch, and only the finished run is reported. The paper does not say which quantization or serving stack it used, and it reports a 32,768 token context. It says its models were decoded with each model's recommended settings, while this port uses temperature 0.7 for both models. A different quantization, context size or serving stack can change the replies and so the trades.
 - **Costs.** This port charges a 1 basis point commission on every order, as the released code does. The limitations section of the paper's second version says trading costs are not modeled.
 - **The window length differs by one day.** The paper's text says 82 trading days. This port uses the 83 days that have price data, which is the length that reproduces the paper's baseline Sortino.
 - **Compare against buy and hold first.** In this window the equal-weight baseline returned about 0.4% with a drawdown of about -15.2%. The baseline is fully invested in all 20 stocks from the first day, while every model starts in cash. A model that ends near zero because it trades very little or falls back to holding on most days is mostly sitting in cash, so check the fallback and unusable-reply columns before reading a return as skill.
